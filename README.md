@@ -10,8 +10,8 @@ Introducing Kimi-Dev: <br>A Strong and Open-source Coding LLM for Issue Resoluti
 </div>
 
 <div align="center">
-  <a href="">
-    <b>📄 Tech Report (Coming soon...)</b>
+  <a href="https://arxiv.org/abs/2509.23045">
+    <b>📄 Tech Report (Arxiv)</b>
   </a> &nbsp;|&nbsp;
   <a href="https://huggingface.co/moonshotai/Kimi-Dev-72B">
     <b>🤗 Huggingface</b>
@@ -118,10 +118,12 @@ If you have any questions, please feel free to submit a GitHub issue or contact 
 ## 📝 Citation
 If you find our code and models useful, please kindly cite the following information.
 ```
-@misc{kimi_dev_72b_2025,
-  title        = {Introducing Kimi-Dev-72B: A Strong and Open Coding LLM for Issue Resolution},
-  author       = {{Kimi-Dev Team}},
-  year         = {2025},
-  month        = {June},
-  url          = {\url{https://www.moonshot.cn/Kimi-Dev}}
+@misc{yang2025kimidevagentlesstrainingskill,
+      title={Kimi-Dev: Agentless Training as Skill Prior for SWE-Agents}, 
+      author={Zonghan Yang and Shengjie Wang and Kelin Fu and Wenyang He and Weimin Xiong and Yibo Liu and Yibo Miao and Bofei Gao and Yejie Wang and Yingwei Ma and Yanhao Li and Yue Liu and Zhenxing Hu and Kaitai Zhang and Shuyi Wang and Huarong Chen and Flood Sung and Yang Liu and Yang Gao and Zhilin Yang and Tianyu Liu},
+      year={2025},
+      eprint={2509.23045},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2509.23045}, 
 }
