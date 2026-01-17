@@ -1,0 +1,3 @@
+[submodule "thirdparty/Agentless"]
+	path = thirdparty/Agentless
+	url = git@github.com:lyuwen/Agentless.git
