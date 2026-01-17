@@ -1330,7 +1330,7 @@ def generate_model_patch_difflib(structure, search_replace_text):
     def pre_process_SearPlace(search_replace_texts):
         # Updated regex pattern to account for possible code block formatting
         # ([^\n]+): This captures the file name, ensuring it only matches non-newline characters (so it won't include unwanted newlines).
-        pattern = r'### ([^\n]+)\n<{4,} SEARCH\n(.*?)\n={4,}\n(.*?)\n>{4,} REPLACE'
+        pattern = r'(?:### )?([^\n]+)\n<{4,} SEARCH\n(.*?)\n={4,}\n(.*?)\n>{4,} REPLACE'
         # pattern = r'### ([^\n]+)\n<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE'
 
         # Find all matches
@@ -1398,7 +1398,7 @@ def generate_model_patch_difflib_testwritter(file_contentes_dict, search_replace
     def pre_process_SearPlace(search_replace_texts):
         # Updated regex pattern to account for possible code block formatting
         # ([^\n]+): This captures the file name, ensuring it only matches non-newline characters (so it won't include unwanted newlines).
-        pattern = r'### ([^\n]+)\n<{4,} SEARCH\n(.*?)\n={4,}\n(.*?)\n>{4,} REPLACE'
+        pattern = r'(?:### )?([^\n]+)\n<{4,} SEARCH\n(.*?)\n={4,}\n(.*?)\n>{4,} REPLACE'
         # pattern = r'### ([^\n]+)\n<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE'
         
         # Find all matches

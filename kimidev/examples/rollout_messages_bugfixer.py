@@ -137,6 +137,10 @@ def llm_chat(llm_model, prompt):
             content = content.replace("◁think▷", "")
             parts = content.split("◁/think▷")
             content = parts[-1]
+        elif "</think>" in content:
+            # content = content.replace("◁think▷", "")
+            parts = content.split("</think>")
+            content = parts[-1]
         # Extract content between triple backticks (```)
         matches = re.findall(r"```.*?```", content, re.DOTALL)
         
@@ -247,11 +251,12 @@ def solve_instance_data(instance_data, repostructure_dir, output_dir, processed_
 if __name__ == "__main__":
     # Set up argument parsing
     parser = argparse.ArgumentParser(description="Select the dataset for processing")
-    parser.add_argument('--dataset', type=str, choices=["princeton-nlp/SWE-bench_Verified"],
+    parser.add_argument('--dataset', type=str, # choices=["princeton-nlp/SWE-bench_Verified"],
                         default='princeton-nlp/SWE-bench_Verified', help="Choose the dataset")
     parser.add_argument("--enable_gt", action= "store_true", help = "enable gt locolization files in llm chat")
     parser.add_argument('--selected_num', type=int, default=500, help="Select how much data")
     parser.add_argument('--model_name', type=str, default="kimi-dev", help="Choose the llm model")
+    parser.add_argument('--backend', type=str, default="kimidev", help="Choose the llm model backend")
     parser.add_argument('--max_tokens', type=int, default=16*1024, help="Max tokens for the llm model")
     parser.add_argument('--temp', type=float, default=0.0, help="Choose the temperature")
     parser.add_argument('--passk', type=int, default=1, help="Choose the passk number")
@@ -286,7 +291,7 @@ if __name__ == "__main__":
 
         # make_model
         try:
-            llm_model = make_model(model=f"{args.model_name}", backend="kimidev", max_tokens=args.max_tokens, temperature=args.temp)
+            llm_model = make_model(model=f"{args.model_name}", backend=args.backend, max_tokens=args.max_tokens, temperature=args.temp)
         except:
             raise ValueError(f"Unknown model name: {args.model_name}")
 

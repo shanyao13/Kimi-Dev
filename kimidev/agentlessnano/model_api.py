@@ -1,3 +1,4 @@
+import os
 import json
 import time
 from abc import ABC, abstractmethod
@@ -197,7 +198,7 @@ def handler(signum, frame):
     raise Exception('end of time')
 
 
-def request_chatgpt_engine(config, base_url=None, max_retries=20, timeout=100, api_key=None):
+def request_chatgpt_engine(config, base_url=None, max_retries=20, timeout=1200, api_key=None):
     ret = None
     retries = 0
 
@@ -209,12 +210,12 @@ def request_chatgpt_engine(config, base_url=None, max_retries=20, timeout=100, a
     while ret is None and retries < max_retries:
         try:
             # Attempt to get the completion
-            ret = client.chat.completions.create(**config)
+            ret = client.chat.completions.create(**config, timeout=timeout)
 
         except openai.OpenAIError as e:
             if isinstance(e, openai.BadRequestError):
                 print(e)
-                if 'maximum context length' in str(e) or 'maximum length' in str(e):
+                if 'maximum context length' in str(e) or 'maximum length' in str(e) or 'max_prompt_tokens' in str(e):
                     return None
                 continue  # retry for R1 model
                 raise Exception('Invalid API Request')
@@ -567,9 +568,13 @@ class OpenAIChatDecoder(DecoderBase):
             batch_size=batch_size,
             model=self.name,
         )
-        ret = request_chatgpt_engine(config)
+        ret = request_chatgpt_engine(
+                config,
+                base_url=os.getenv("OPENAI_BASE_URL", f'http://127.0.0.1:8000/v1'),
+                api_key=os.getenv("OPENAI_API_KEY", 'EMPTY'),
+                )
         if ret:
-            responses = [choice.message.content for choice in ret.choices]
+            responses = [choice.message.content if not getattr(choice, "reasoning_content", "") else f"<think>{choice.message.reasoning_content}</think>{choice.message.content}" for choice in ret.choices]
             completion_tokens = ret.usage.completion_tokens
             prompt_tokens = ret.usage.prompt_tokens
         else:
@@ -689,8 +694,8 @@ class KimiDevChatDecoder(DecoderBase):
             while ret_len == 0:
                 ret = request_chatgpt_engine(
                     config,
-                    base_url=f'http://127.0.0.1:8000/v1',
-                    api_key='EMPTY',
+                    base_url=os.getenv("OPENAI_BASE_URL", f'http://127.0.0.1:8000/v1'),
+                    api_key=os.getenv("OPENAI_API_KEY", 'EMPTY'),
                 )
                 ret_len = len(ret.choices)
             # ****************************************************************
