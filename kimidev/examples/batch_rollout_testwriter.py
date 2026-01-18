@@ -490,14 +490,53 @@ def proc_step2(args):
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         results = list(tqdm(executor.map(process_item_step3_full, process_items), total=len(process_items)))
         
-        for i, res_json in enumerate(results):
-            if res_json:
-                custom_id = process_items[i][0]
-                output_file_path = os.path.join(args.save_dir, f'{custom_id}.jsonl')
+        # Aggregate results by pass index
+        pass_outputs = {} # integer key -> list of json strings
+        
+        # Subdirectory for ungrouped samples
+        samples_dir = os.path.join(args.save_dir, 'samples')
+        os.makedirs(samples_dir, exist_ok=True)
+        
+        for res in results:
+            if res:
+                custom_id, raw_dict, instance_dict = res
+                
+                # 1. Save ungrouped raw version to subdirectory
+                output_file_path = os.path.join(samples_dir, f'{custom_id}.jsonl')
                 with open(output_file_path, 'w') as out_f:
-                    out_f.write(res_json + '\n')
+                    out_f.write(json.dumps(raw_dict, ensure_ascii=False) + '\n')
+
+                # 2. Aggregate processed version
+                # Determine pass index
+                if "__pass" in custom_id:
+                    try:
+                        pass_idx = int(custom_id.split("__pass")[1])
+                    except ValueError:
+                        pass_idx = 0
+                else:
+                    pass_idx = 0
+                
+                if pass_idx not in pass_outputs:
+                    pass_outputs[pass_idx] = []
+                
+                pass_outputs[pass_idx].append(json.dumps(instance_dict)) # Using default separators
+        
+        # Save aggregated files
+        for pass_idx, lines in pass_outputs.items():
+            output_filename = f"output_{pass_idx}_processed_reproduction_test.jsonl"
+            output_file_path = os.path.join(args.save_dir, output_filename)
             
-    print(f"Results saved to {args.save_dir}")
+            # Append if file exists? The user prompt said "convert... and save", usually implies overwrite or fresh dir.
+            # But standardized batch scripts usually overwrite.
+            # However, if we run parallel, we collected all in memory list.
+            
+            with open(output_file_path, 'w') as out_f:
+                for line in lines:
+                    out_f.write(line + '\n')
+            
+            print(f"Saved {len(lines)} records to {output_filename}")
+            
+    print(f"All results saved to {args.save_dir}")
 
 def process_item_step3_full(item_tuple):
     custom_id, response_item, step1_item, instance_data, args_repostructure_dir, args_save_dir = item_tuple
@@ -574,27 +613,24 @@ def process_item_step3_full(item_tuple):
     model_patch = generate_model_patch_difflib_testwritter(file_contentes_dict=file_contentes_dict, search_replace_text=search_replace_text)
     
     # Prepare output dict
-    gt_patch = instance_data.get("test_patch", "")
-    from kimidev.agentlessnano.utils import parse_patch, generate_found_edit_locs
-    
-    # Note: validation/metrics might differ for testwriter vs bugfixer?
-    # In original script:
-    # gt_parsed_patch = parse_patch(gt_patch)
-    # instance_data["parsed_patch"] = gt_parsed_patch
-    # found_files_gt = get_relevant_files(instance_data)
-    # found_related_locs, found_edit_locs = generate_found_edit_locs(gt_parsed_patch, structure)
-    # gt_results = { ... }
-    
-    # We will replicate basic GT saving
-    instance_dict = {
+    # 1. Raw/Ungrouped dict (previous format, for debugging/reference)
+    raw_dict = {
         "instance_id": instance_id,
         "model_patch": model_patch,
         "search_replace_text": search_replace_text,
         "raw_output": raw_answer,
-        # "gt_results": gt_results # Optional: reconstruct if needed
+    }
+
+    # 2. Processed dict (target schema for reproduction testing)
+    instance_dict = {
+        "model_name_or_path": "agentless",
+        "instance_id": instance_id,
+        "test_patch": model_patch,
+        "raw_test_patch": search_replace_text,
+        "original_file_content": ""
     }
     
-    return json.dumps(instance_dict, ensure_ascii=False)
+    return (custom_id, raw_dict, instance_dict)
 
 
 if __name__ == "__main__":

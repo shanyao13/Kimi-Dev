@@ -326,7 +326,9 @@ def process_item_step3(item_tuple):
     }
 
     # Save result
-    instance_dict = {
+    # Save result
+    # 1. Raw/Ungrouped dict (previous format, for debugging/reference)
+    raw_dict = {
         "instance_id": instance_id,
         "model_patch": model_patch,
         "search_replace_text": search_replace_text,
@@ -334,7 +336,18 @@ def process_item_step3(item_tuple):
         "gt_results": gt_results
     }
     
-    return json.dumps(instance_dict, ensure_ascii=False)
+    # 2. Processed dict (Agentless repair schema)
+    processed_dict = {
+        "model_name_or_path": "agentless",
+        "instance_id": instance_id,
+        "model_patch": model_patch,
+        "raw_model_patch": search_replace_text,
+        "original_file_content": "",
+        "edited_files": [], # Populated based on actual logic if needed, currently placeholder
+        "new_file_content": "" # Placeholder
+    }
+    
+    return (custom_id, raw_dict, processed_dict)
 
 
 def proc_step2(args):
@@ -378,17 +391,51 @@ def proc_step2(args):
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         results = list(tqdm(executor.map(process_item_step3, process_items), total=len(process_items)))
         
-        for i, res_json in enumerate(results):
-            if res_json:
-                custom_id = process_items[i][0] # Retrieve custom_id from input list
-                instance_dict = json.loads(res_json)
-                
-                # We need to save to a file named by custom_id
-                output_file_path = os.path.join(args.save_dir, f'{custom_id}.jsonl')
-                with open(output_file_path, 'w') as out_f:
-                    out_f.write(res_json + '\n')
+        
+        # Aggregate results by pass index
+        pass_outputs = {} # integer key -> list of json strings
+        
+        # Subdirectory for ungrouped samples
+        samples_dir = os.path.join(args.save_dir, 'samples')
+        if not os.path.exists(samples_dir):
+            os.makedirs(samples_dir)
             
-    print(f"Results saved to {args.save_dir}")
+        for res in results:
+            if res:
+                custom_id, raw_dict, processed_dict = res
+                
+                # 1. Save ungrouped raw version to subdirectory
+                output_file_path = os.path.join(samples_dir, f'{custom_id}.jsonl')
+                with open(output_file_path, 'w') as out_f:
+                    out_f.write(json.dumps(raw_dict, ensure_ascii=False) + '\n')
+                
+                # 2. Aggregate processed version
+                # Determine pass index
+                if "__pass" in custom_id:
+                    try:
+                        pass_idx = int(custom_id.split("__pass")[1])
+                    except ValueError:
+                        pass_idx = 0
+                else:
+                    pass_idx = 0
+                
+                if pass_idx not in pass_outputs:
+                    pass_outputs[pass_idx] = []
+                
+                pass_outputs[pass_idx].append(json.dumps(processed_dict))
+            
+        # Save aggregated files
+        for pass_idx, lines in pass_outputs.items():
+            output_filename = f"output_{pass_idx}_processed.jsonl"
+            output_file_path = os.path.join(args.save_dir, output_filename)
+            
+            with open(output_file_path, 'w') as out_f:
+                for line in lines:
+                    out_f.write(line + '\n')
+            
+            print(f"Saved {len(lines)} records to {output_filename}")
+            
+    print(f"All results saved to {args.save_dir}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
