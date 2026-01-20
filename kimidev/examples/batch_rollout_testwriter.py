@@ -16,7 +16,7 @@ from kimidev.agentlessnano.utils import (
     get_full_file_paths_and_classes_and_functions,
     show_project_structure
 )
-from kimidev.agentlessnano.testwritter_utils import remove_test_cases
+from kimidev.agentlessnano.testwritter_utils import remove_test_cases, create_patch_from_code
 from kimidev.agentlessnano.post_process import generate_model_patch_difflib_testwritter
 
 @functools.lru_cache(maxsize=50)
@@ -487,63 +487,410 @@ def proc_step2(args):
         
     print(f"Prepared {len(process_items)} items for processing. Starting parallel execution...")
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
-        results = list(tqdm(executor.map(process_item_step3_full, process_items), total=len(process_items)))
-        
-        # Aggregate results by pass index
-        pass_outputs = {} # integer key -> list of json strings
-        
-        # Subdirectory for ungrouped samples
-        samples_dir = os.path.join(args.save_dir, 'samples')
-        os.makedirs(samples_dir, exist_ok=True)
-        
-        for res in results:
-            if res:
-                custom_id, raw_dict, instance_dict = res
-                
-                # 1. Save ungrouped raw version to subdirectory
-                output_file_path = os.path.join(samples_dir, f'{custom_id}.jsonl')
-                with open(output_file_path, 'w') as out_f:
-                    out_f.write(json.dumps(raw_dict, ensure_ascii=False) + '\n')
+    # Subdirectory for ungrouped samples
+    samples_dir = os.path.join(args.save_dir, 'samples')
+    os.makedirs(samples_dir, exist_ok=True)
+    
+    pass_outputs = {} # integer key -> list of json strings
 
-                # 2. Aggregate processed version
-                # Determine pass index
-                if "__pass" in custom_id:
-                    try:
-                        pass_idx = int(custom_id.split("__pass")[1])
-                    except ValueError:
-                        pass_idx = 0
-                else:
-                    pass_idx = 0
-                
-                if pass_idx not in pass_outputs:
-                    pass_outputs[pass_idx] = []
-                
-                pass_outputs[pass_idx].append(json.dumps(instance_dict)) # Using default separators
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+        # Submit all tasks
+        futures = {executor.submit(process_item_step3_full, item): item[0] for item in process_items}
         
-        # Save aggregated files
-        for pass_idx, lines in pass_outputs.items():
-            output_filename = f"output_{pass_idx}_processed_reproduction_test.jsonl"
-            output_file_path = os.path.join(args.save_dir, output_filename)
-            
-            # Append if file exists? The user prompt said "convert... and save", usually implies overwrite or fresh dir.
-            # But standardized batch scripts usually overwrite.
-            # However, if we run parallel, we collected all in memory list.
-            
-            with open(output_file_path, 'w') as out_f:
-                for line in lines:
-                    out_f.write(line + '\n')
-            
-            print(f"Saved {len(lines)} records to {output_filename}")
+        # Failure log file
+        failure_log_path = os.path.join(args.save_dir, 'failures.jsonl')
+        
+        # Pass failure_log_path into worker (or write inside worker locally? 
+        # Writing to single file from multiple workers is tricky (race conditions/interleaved writes).
+        # Better to have each worker write its own failures or just return failure info (small).
+        # But saving SUCCESS files (which are unique) is safe in worker.
+        
+        # Updated plan: Save SUCCESS files in worker. Return FAILURE info to main (it's small).
+        
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(process_items)):
+            try:
+                res = future.result()
+                if res:
+                    if res.get('status') == 'failed':
+                         # Log failure in MAIN process to avoid race conditions on single file
+                        with open(failure_log_path, 'a') as f:
+                            f.write(json.dumps(res, ensure_ascii=False) + '\n')
+                        continue
+                    
+                    if res.get('status') == 'success':
+                         # Files already saved in worker
+                         # Aggregate for final output if needed? 
+                         # We need to build pass_outputs for "output_N_processed.jsonl"
+                         # So we still need minimal info: custom_id (for pass_idx) and instance_dict (parsed content).
+                         # But instance_dict has patch which can be large.
+                         # Can we write to "output_N" incrementally? No, it's one file per pass.
+                         # Maybe we just need the JSON line string?
+                         
+                         custom_id = res['custom_id']
+                         instance_dict_str = res['instance_dict_str'] # Pass string instead of dict?
+                         
+                         # Determine pass index
+                         if "__pass" in custom_id:
+                             try:
+                                 pass_idx = int(custom_id.split("__pass")[1])
+                             except ValueError:
+                                 pass_idx = 0
+                         else:
+                             pass_idx = 0
+                         
+                         if pass_idx not in pass_outputs:
+                             pass_outputs[pass_idx] = []
+                         
+                         pass_outputs[pass_idx].append(instance_dict_str)
+
+            except Exception as e:
+                print(f"Error processing item: {e}")
+            except Exception as e:
+                print(f"Error processing item: {e}")
+        
+    # Save aggregated files
+    for pass_idx, lines in pass_outputs.items():
+        output_filename = f"output_{pass_idx}_processed_reproduction_test.jsonl"
+        output_file_path = os.path.join(args.save_dir, output_filename)
+        
+        with open(output_file_path, 'w') as out_f:
+            for line in lines:
+                out_f.write(line + '\n')
+        
+        print(f"Saved {len(lines)} records to {output_filename}")
             
     print(f"All results saved to {args.save_dir}")
+
+
+def fix_relative_imports(content, file_path):
+    """
+    Converts relative imports (e.g. 'from . import utls') to absolute imports 
+    (e.g. 'from path.to import utils') based on the file_path.
+    """
+    import ast
+    
+    # Estimate package path from file_path
+    # e.g., 'django/contrib/admin/tests.py' -> 'django.contrib.admin'
+    # Remove extension
+    path_no_ext = os.path.splitext(file_path)[0]
+    parts = path_no_ext.split(os.sep)
+    
+    # If the file is basically at root, no relative imports to fix (or stripped)
+    if len(parts) <= 1:
+        return content
+
+    # The package this file belongs to is the dir path
+    package_parts = parts[:-1]
+    package_name = ".".join(package_parts)
+    
+    try:
+        tree = ast.parse(content)
+        
+        class ImportFixer(ast.NodeTransformer):
+            def visit_ImportFrom(self, node):
+                if node.level > 0: # Relative import
+                    # level 1 = ., level 2 = ..
+                    # We need to go up (level - 1) times from package_name
+                    
+                    # Effective package parts
+                    if node.level > len(package_parts) + 1:
+                         # Too many dots? Just return (can't resolve)
+                         return node
+                    
+                    # . (level 1) means current package
+                    # .. (level 2) means parent
+                    # so we slice package_parts[:-(level-1)]
+                    
+                    if node.level == 1:
+                        base_pkg = package_parts
+                    else:
+                        base_pkg = package_parts[:-(node.level - 1)]
+                        
+                    base_pkg_str = ".".join(base_pkg)
+                    
+                    if node.module:
+                        new_module = f"{base_pkg_str}.{node.module}"
+                    else:
+                        new_module = base_pkg_str
+                        
+                    node.level = 0
+                    node.module = new_module
+                return node
+        
+        fixed_tree = ImportFixer().visit(tree)
+        ast.fix_missing_locations(fixed_tree)
+        return ast.unparse(fixed_tree)
+        
+    except Exception as e:
+        print(f"Error fixing relative imports: {e}")
+        return content
+
+def make_reproduction_script(content, test_func_name, file_path=None):
+    """
+    Wraps the content (which contains the new test) into a standalone script
+    that runs the specific test function using pytest or unittest.
+    Also fixes relative imports if file_path is provided.
+    """
+    import ast
+    
+    # Fix relative imports first
+    if file_path:
+        content = fix_relative_imports(content, file_path)
+    
+    # Check if we can find the class of the function
+    try:
+        tree = ast.parse(content)
+        class_name = None
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for subnode in node.body:
+                    if isinstance(subnode, ast.FunctionDef) and subnode.name == test_func_name:
+                        class_name = node.name
+                        break
+                if class_name:
+                    break
+        
+        script_content = content + "\n\n"
+        script_content += "if __name__ == '__main__':\n"
+        
+        if class_name:
+            # It's a method in a class. Try to distinguish unittest vs pytest style?
+            # Safe bet: use unittest runner if it looks like unittest, otherwise try pytest
+            # But simpler: just use unittest runner with correct address if possible, 
+            # Or assume pytest is available in environment (standard for swe-bench verified?)
+            
+            # Using unittest invocation style which handles both usually if it inherits TestCase
+            script_content += "    import unittest\n"
+            script_content += "    try:\n"
+            script_content += f"        suite = unittest.TestLoader().loadTestsFromName('__main__.{class_name}.{test_func_name}')\n"
+            script_content += "        res = unittest.TextTestRunner(verbosity=2).run(suite)\n"
+            script_content += "        if not res.wasSuccessful():\n"
+            script_content += "             print('Issue reproduced')\n"
+            script_content += "             sys.exit(1)\n"
+            script_content += "        else:\n"
+            script_content += "             print('Issue resolved')\n"
+            script_content += "             sys.exit(0)\n"
+            script_content += "    except ImportError:\n"
+            # Fallback to pytest if unittest loading fails (e.g. not a TestCase)
+            script_content += "        import pytest\n"
+            script_content += "        import sys\n"
+            script_content += f"        ret = pytest.main(['-v', __file__ + '::{class_name}::{test_func_name}'])\n"
+            script_content += "        if ret != 0:\n"
+            script_content += "            print('Issue reproduced')\n"
+            script_content += "        else:\n"
+            script_content += "            print('Issue resolved')\n"
+            script_content += "        sys.exit(ret)\n"
+            script_content += "    except Exception:\n"
+             # Double fallback
+            script_content += "        import pytest\n"
+            script_content += "        import sys\n"
+            script_content += f"        ret = pytest.main(['-v', __file__ + '::{class_name}::{test_func_name}'])\n"
+            script_content += "        if ret != 0:\n"
+            script_content += "            print('Issue reproduced')\n"
+            script_content += "        else:\n"
+            script_content += "            print('Issue resolved')\n"
+            script_content += "        sys.exit(ret)\n"
+        else:
+            # Top level function
+            script_content += f"    try:\n"
+            script_content += f"        {test_func_name}()\n"
+            script_content += "        print('Issue resolved')\n"
+            script_content += "        sys.exit(0)\n"
+            script_content += "    except Exception:\n"
+            script_content += "        print('Issue reproduced')\n"
+            script_content += "        sys.exit(1)\n"
+            
+        return script_content
+    except Exception as e:
+        # Fallback: just return content and hope
+        print(f"Error making reproduction script: {e}")
+        return content
+
+def apply_patches(file_contentes_dict, search_replace_text):
+    """
+    Parses SEARCH/REPLACE blocks and updates file_contentes_dict in place.
+    """
+    import re
+    # Pattern to match:
+    # [filename]
+    # <<<<<<< SEARCH
+    # [search_content]
+    # =======
+    # [replace_content]
+    # >>>>>>> REPLACE
+    
+    # Using the pattern from post_process.py
+    pattern = r'(?:### )?([^\n]+)\n<{4,} SEARCH\n(.*?)\n={4,}\n(.*?)\n>{4,} REPLACE'
+    
+    matches = re.findall(pattern, search_replace_text, re.DOTALL)
+    
+    for file_name, search_str, replace_str in matches:
+        file_name = file_name.strip()
+        if file_name in file_contentes_dict:
+            current_content = file_contentes_dict[file_name]['new_content']
+            
+            # 1. Exact match
+            if search_str in current_content:
+                new_content = current_content.replace(search_str, replace_str)
+                file_contentes_dict[file_name]['new_content'] = new_content
+                continue
+                
+            # 2. Try normalizing match (strip start/end newlines)
+            s_strip = search_str.strip()
+            if s_strip and s_strip in current_content:
+                # If the stripped search block is unique enough to be found:
+                # match replace_str behavior? 
+                # Attempt to replace the literal found stripped string with the replace string (maybe also stripped?)
+                # This helps if the model added/missed a newline at start/end of block.
+                # However, we must be careful not to leave artifacts.
+                
+                # Heuristic: If replace_str starts/ends with newline matching search_str, preserve?
+                # Simpler: just replace the found s_strip with replace_str.strip() surrounded by necessary newlines?
+                # Let's just try replacing s_strip with replace_str (preserving its indentation if it had any).
+                
+                # Check if replacing s_strip gives a valid python code approx?
+                # Actually, often the model output has `\n\n` before search, regex captures empty line.
+                # s_strip removes it. current_content has the code.
+                # So replacing s_strip with replace_str is plausible.
+                new_content = current_content.replace(s_strip, replace_str)
+                file_contentes_dict[file_name]['new_content'] = new_content
+                continue
+            
+            print(f"Warning: SEARCH block not found in {file_name}")
+
+def make_reproduction_script_full_file(content, file_path=None):
+    """
+    Uses the full file content as the reproduction script.
+    Fixes relative imports and ensures a main block exists to run tests.
+    """
+    if file_path:
+        content = fix_relative_imports(content, file_path)
+        
+    script_content = content + "\n\n"
+    
+    # Check if main block already exists
+    if "if __name__ == '__main__':" not in content and 'if __name__ == "__main__":' not in content:
+        script_content += "if __name__ == '__main__':\n"
+        script_content += "    try:\n"
+        script_content += "        import pytest\n"
+        script_content += "        import sys\n"
+        script_content += "        ret = pytest.main(['-v', __file__])\n"
+        script_content += "        if ret != 0:\n"
+        script_content += "            print('Issue reproduced')\n"
+        script_content += "        else:\n"
+        script_content += "            print('Issue resolved')\n"
+        script_content += "        sys.exit(ret)\n"
+        script_content += "    except ImportError:\n"
+        script_content += "        import unittest\n"
+        # unittest.main typically exits. We use exit=False to capture result
+        script_content += "        try:\n"
+        script_content += "            unittest.main(exit=False)\n"
+        script_content += "            # If we get here without exception, tests passed? No, result is printed.\n"
+        script_content += "            # unittest.main(exit=False) returns TestProgram.\n"
+        script_content += "            # But capturing success is harder without result object.\n"
+        script_content += "            # Simpler fallback: just assume if it didn't exit, it passed? No.\n"
+        script_content += "            # Actually, standard unittest doesn't return status clearly in main().\n"
+        script_content += "            # Let's trust pytest is available in SWE-bench env (it is).\n"
+        script_content += "            # Keep unittest as fallback but maybe just print nothing or minimal?\n"
+        script_content += "            # Or use result = unittest.TextTestRunner().run(unittest.TestLoader().loadTestsFromModule(sys.modules[__name__]))\n"
+        script_content += "        except SystemExit as e:\n"
+        script_content += "             if e.code != 0:\n"
+        script_content += "                 print('Issue reproduced')\n"
+        script_content += "             else:\n"
+        script_content += "                 print('Issue resolved')\n"
+        script_content += "             sys.exit(e.code)\n"
+        # Fallback for unittest main if it doesn't raise SystemExit (exit=False usage above logic was messy)
+        # Revert to standard unittest.main() but wrap it?
+        # Actually in SWE-bench, pytest is almost always used.
+        # I'll stick to a simpler unittest block that just runs main().
+        # But user wants prints.
+        # Let's try:
+        script_content += "        res = unittest.main(exit=False)\n"
+        script_content += "        if not res.result.wasSuccessful():\n"
+        script_content += "             print('Issue reproduced')\n"
+        script_content += "             sys.exit(1)\n"
+        script_content += "        else:\n"
+        script_content += "             print('Issue resolved')\n"
+        script_content += "             sys.exit(0)\n"
+    
+    return script_content
+
+
+def identify_new_test_methods(old_content, new_content):
+    """
+    Parses old and new content to find newly added OR modified functions/methods that start with 'test_'.
+    Priority: Added > Modified.
+    Returns the name of the target test function found, or None.
+    """
+    import ast
+    
+    def get_functions(code):
+        funcs = {} # name -> node
+        if not code: return funcs
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                    funcs[node.name] = node
+        except:
+            pass
+        return funcs
+
+    old_funcs = get_functions(old_content)
+    new_funcs = get_functions(new_content)
+    
+    # Check for added (Priority 1)
+    # We want to traverse NEW content order to pick the last one if unordered dict?
+    # Actually python 3.7+ dicts preserve insertion order. AST walk order is file order.
+    # So list(new_funcs.keys()) is essentially ordered.
+    
+    added_tests = []
+    for name in new_funcs:
+        if name not in old_funcs:
+            added_tests.append(name)
+            
+    if added_tests:
+        return added_tests[-1]
+        
+    # Check for modified (Priority 2)
+    modified_tests = []
+    for name in new_funcs:
+        if name in old_funcs:
+            # Compare AST structure (ignores comments/formatting mostly)
+            # ast.dump includes line numbers unless verify=False (but that's only compile)
+            # wait, ast.dump includes fields. If line numbers differ (which they will if moved), it might differ.
+            # We should probably compare source or use ast.dump(node, include_attributes=False) if py3.9+
+            # Fallback: compare source segment? Or just content?
+            # Simpler: extraction of code via ast.get_source_segment is tricky without source.
+            
+            # Use unparse comparison (Python 3.9+) if available, else dump
+            try:
+                # normalize
+                n_dump = ast.dump(new_funcs[name])
+                o_dump = ast.dump(old_funcs[name])
+                # This is strict. If line numbers are in dump, it fails on shift.
+                # But typically ast.dump DOES NOT include line numbers by default in older python?
+                # Actually it does not include lineno/col_offset unless specified?
+                # Let's verify defaults. Python 3.9+ 'include_attributes=False' default is False.
+                # So it should be safe for logic comparison?
+                
+                if n_dump != o_dump:
+                    modified_tests.append(name)
+            except:
+                pass
+
+    if modified_tests:
+        return modified_tests[-1]
+
+    return None
 
 def process_item_step3_full(item_tuple):
     custom_id, response_item, step1_item, instance_data, args_repostructure_dir, args_save_dir = item_tuple
 
     # Status check
     if 'status_code' in response_item['response'] and response_item['response']['status_code'] != 200:
-        return None
+        return {'status': 'failed', 'reason': 'step2_request_failed', 'custom_id': custom_id, 'details': str(response_item['response'])}
 
     raw_answer = response_item['response']['body']['choices'][0]['message']['content']
     
@@ -571,12 +918,13 @@ def process_item_step3_full(item_tuple):
         instance_id = custom_id
 
     structure = get_repo_structure(instance_id, args_repostructure_dir)
-    if structure is None: return None
+    if structure is None: 
+        return {'status': 'failed', 'reason': 'structure_not_found', 'custom_id': custom_id, 'instance_id': instance_id}
     
     # Reconstruct found_files from Step 1
     # Check Step 1 status
     if 'status_code' in step1_item['response'] and step1_item['response']['status_code'] != 200:
-        return None
+        return {'status': 'failed', 'reason': 'step1_request_failed', 'custom_id': custom_id, 'details': str(step1_item['response'])}
         
     raw_answer1 = step1_item['response']['body']['choices'][0]['message']['content']
     model_found_files = raw_answer1.strip().split("\n")
@@ -595,42 +943,91 @@ def process_item_step3_full(item_tuple):
     if len(found_files) > 0:
         found_files = found_files[:1]
     else:
-        pass # If empty, file_contentes_dict will be empty, model_patch likely empty
+        return {'status': 'failed', 'reason': 'no_test_files_found', 'custom_id': custom_id, 'found_files': model_found_files}
 
     file_contents = get_repo_files(structure, found_files)
-    file_contentes_dict = remove_test_cases(structure, {})
+    # file_contentes_dict = remove_test_cases(structure, {}) # REMOVE THIS
+    file_contentes_dict = {} # Start empty
     
     for file_name, content in file_contents.items():
-        if(file_name in file_contentes_dict):
-             pass # content already there
-        else:
             file_contentes_dict[file_name] = {
                 'old_content': content,
                 'new_content': content
             }
             
     # Generate Patch
-    model_patch = generate_model_patch_difflib_testwritter(file_contentes_dict=file_contentes_dict, search_replace_text=search_replace_text)
+    # Note: generate_model_patch_difflib_testwritter does NOT update dict in place, so we must do it ourselves
+    apply_patches(file_contentes_dict, search_replace_text)
     
+    # We can still call this if we want a unified diff patch string for some other reason, 
+    # but for reproduction script we rely on the updated file_contentes_dict
+    _ = generate_model_patch_difflib_testwritter(file_contentes_dict=file_contentes_dict, search_replace_text=search_replace_text)
+    
+    # NEW LOGIC: Generate reproduce_bug.py patch
+    
+    # 1. Get the target file (we assume single key file modified)
+    target_file = found_files[0] if found_files else None
+    
+    model_patch = ""
+    test_func_name = None
+    
+    if target_file and target_file in file_contentes_dict:
+        new_content = file_contentes_dict[target_file]['new_content']
+        
+        # Use full file strategy as requested
+        # We take the entire updated file content, fix relative imports, and ensure it runs.
+        repro_script_content = make_reproduction_script_full_file(new_content, file_path=target_file)
+        model_patch = create_patch_from_code(repro_script_content)
+            
+    else:
+                return {'status': 'failed', 'reason': 'target_file_not_in_contents', 'custom_id': custom_id, 'target_file': target_file, 'available': list(file_contentes_dict.keys())}
+
     # Prepare output dict
     # 1. Raw/Ungrouped dict (previous format, for debugging/reference)
     raw_dict = {
+        "custom_id": custom_id, 
         "instance_id": instance_id,
-        "model_patch": model_patch,
+        "raw_answer": raw_answer,
         "search_replace_text": search_replace_text,
-        "raw_output": raw_answer,
-    }
-
-    # 2. Processed dict (target schema for reproduction testing)
-    instance_dict = {
-        "model_name_or_path": "agentless",
-        "instance_id": instance_id,
-        "test_patch": model_patch,
-        "raw_test_patch": search_replace_text,
-        "original_file_content": ""
+        "model_found_files": model_found_files,
+        "found_files": found_files,
+        "file_contentes_dict": file_contentes_dict, 
+        # Note: file_contentes_dict has full content, potentially large. 
+        # If we save here, we are good.
     }
     
-    return (custom_id, raw_dict, instance_dict)
+    # 2. Processed dict (for final output)
+    instance_dict = {
+        "model_name_or_path": response_item['response']['body']['model'],
+        "instance_id": instance_id,
+        "test_patch": model_patch,
+        # User feedback: raw_test_patch should be the content of the final reproduce_bug.py
+        # Consuming tool expects markdown code block
+        "raw_test_patch": f"```python\n{repro_script_content}\n```",
+        "test_func_name": test_func_name,
+        "original_file_content": "" 
+    }
+    
+    # SAVE LOCALLY IN WORKER to avoid IPC
+    # We need samples_dir. It is derived from args_save_dir passed in item_tuple
+    import os
+    import json
+    samples_dir = os.path.join(args_save_dir, 'samples')
+    # os.makedirs(samples_dir, exist_ok=True) # Likely already exists, or race to create?
+    # makedirs is thread/process safe in recent python? Yes, with exist_ok=True.
+    
+    try:
+        output_file_path = os.path.join(samples_dir, f'{custom_id}.jsonl')
+        with open(output_file_path, 'w') as out_f:
+            out_f.write(json.dumps(raw_dict, ensure_ascii=False) + '\n')
+            
+        return {
+            'status': 'success',
+            'custom_id': custom_id,
+            'instance_dict_str': json.dumps(instance_dict) # Return string to minimize pickling overhead? logic in main uses string.
+        }
+    except Exception as e:
+        return {'status': 'failed', 'reason': 'save_error', 'custom_id': custom_id, 'details': str(e)}
 
 
 if __name__ == "__main__":

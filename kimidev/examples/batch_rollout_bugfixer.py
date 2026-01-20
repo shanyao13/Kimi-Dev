@@ -12,6 +12,179 @@ import concurrent.futures
 def get_repo_structure(instance_id, repostructure_dir):
     return search_instance_id_and_extract_structure(instance_id, repostructure_dir)
 
+def get_indent(line):
+    return len(line) - len(line.lstrip())
+
+def adjust_indentation(replace_block, indent_diff):
+    lines = replace_block.splitlines(keepends=True)
+    adjusted_lines = []
+    for line in lines:
+        if not line.strip():
+            adjusted_lines.append(line)
+            continue
+            
+        current_indent = get_indent(line)
+        new_indent = current_indent + indent_diff
+        if new_indent < 0: 
+            new_indent = 0 # Safety clamp
+            
+        adjusted_lines.append(" " * new_indent + line.lstrip())
+    
+    return "".join(adjusted_lines)
+
+def apply_patches_robust(original_content, search_block, replace_block):
+
+    # 3. Soft match (ignore leading/trailing whitespace per line)
+    content_lines = original_content.splitlines(keepends=True)
+    search_lines = search_block.splitlines(keepends=True)
+    
+    n_search = len(search_lines)
+    if n_search == 0: return original_content
+    
+    for i in range(len(content_lines) - n_search + 1):
+        window = content_lines[i:i+n_search]
+        match = True
+        for wa, wb in zip(window, search_lines):
+            if wa.strip() != wb.strip():
+                match = False
+                break
+        
+        if match:
+            # Found match!
+            actual_first_line = content_lines[i]
+            # Use the first non-empty line in search for reliable diff calculation
+            # If all are empty, diff is 0
+            search_first_line_idx = 0
+            for idx, line in enumerate(search_lines):
+                if line.strip():
+                    search_first_line_idx = idx
+                    break
+            
+            search_first_line = search_lines[search_first_line_idx]
+            
+            # Note: actual_first_line matches search_first_line in content (at i + search_first_line_idx)
+            # wait, i points to start of block.
+            actual_line_for_indent = content_lines[i + search_first_line_idx]
+            
+            indent_actual = get_indent(actual_line_for_indent)
+            indent_search = get_indent(search_first_line)
+            diff = indent_actual - indent_search
+            
+            # Adjust replace block
+            adjusted_replace = adjust_indentation(replace_block, diff)
+
+            pre = "".join(content_lines[:i])
+            post = "".join(content_lines[i+n_search:])
+            return pre + adjusted_replace + post
+            
+    return original_content
+
+def generate_robust_diff(structure, search_replace_text):
+    import re
+    import difflib
+    
+    # Parse SEARCH/REPLACE blocks
+    pattern = r'(?:### )?([^\n]+)\n<{4,} SEARCH\n(.*?)\n={4,}\n(.*?)(?:\n)?>{4,} REPLACE'
+    matches = re.findall(pattern, search_replace_text, re.DOTALL)
+    
+    file_level_diff = ""
+    edited_files_list = []
+    original_contents_list = []
+    new_contents_list = []
+    
+    # Group by file
+    file_edits = {}
+    for file_name, search_str, replace_str in matches:
+        if file_name.strip() == "": continue
+        
+        # Ensure replace_str ends with newline if not empty, 
+        # because we are doing line-based replacement
+        if replace_str and not replace_str.endswith('\n'):
+            replace_str += '\n'
+            
+        file_name = file_name.strip()
+        if file_name not in file_edits:
+            file_edits[file_name] = []
+        file_edits[file_name].append((search_str, replace_str))
+        
+    # Apply edits
+    files, _, _ = get_full_file_paths_and_classes_and_functions(structure)
+    
+    for file_name, edits in file_edits.items():
+        # Correct path
+        full_path = correct_file_path_in_structure(file_name, structure)
+        
+        # Get content
+        # Note: get_repo_files expects a list
+        file_content_dict = get_repo_files(structure, [full_path])
+        if full_path not in file_content_dict:
+            continue
+            
+        original = file_content_dict[full_path]
+        modified = original
+        
+        for search_str, replace_str in edits:
+            modified = apply_patches_robust(modified, search_str, replace_str)
+            
+        if modified == original:
+            continue
+            
+        # Generate diff
+        diff = difflib.unified_diff(
+            original.splitlines(keepends=True),
+            modified.splitlines(keepends=True),
+            fromfile=f"a/{file_name}",
+            tofile=f"b/{file_name}"
+        )
+        
+        # Format diff for git apply (unified_diff return generator)
+        # We need to manually construct the header if we want strict git format or just use the output?
+        # difflib.unified_diff produces:
+        # --- a/file
+        # +++ b/file
+        # @@ ... @@
+        #
+        # git apply expects:
+        # diff --git a/file b/file
+        # index ...
+        # --- a/file
+        # +++ b/file
+        
+        diff_lines = list(diff)
+        if not diff_lines:
+            continue
+            
+        header = [f"diff --git a/{file_name} b/{file_name}\n"]
+        # We can skip index line or fake it
+        # header.append("index 0000000..0000000 100644\n") 
+        # Actually git apply is happy with just diff --git + --- + +++
+        
+        # But wait, difflib output usually starts with --- and +++
+        # Let's check what generate_model_patch_difflib returns.
+        # It manually constructs "diff --git..." then iterates lines.
+        
+        now_diff_content = f"diff --git a/{file_name} b/{file_name}\n"
+        for line in diff_lines:
+            if line.startswith('--- '):
+                now_diff_content += f"--- a/{file_name}\n"
+            elif line.startswith('+++ '):
+                now_diff_content += f"+++ b/{file_name}\n"
+            else:
+                if not line.endswith('\n'):
+                    line += '\n'
+                now_diff_content += line
+        
+        file_level_diff += now_diff_content
+        
+        file_level_diff += now_diff_content
+        
+        # Capture content for edited files
+        edited_files_list.append(file_name)
+        original_contents_list.append(original)
+        new_contents_list.append(modified)
+        
+    return file_level_diff, edited_files_list, original_contents_list, new_contents_list
+
 def make_request_body(custom_id, model_name, messages, max_tokens, temperature, enable_thinking=False, thinking_budget=32768):
     body = {
         "model": model_name,
@@ -306,7 +479,7 @@ def process_item_step3(item_tuple):
     if structure is None: return None
 
     # Generate Patch
-    model_patch = generate_model_patch_difflib(structure=structure, search_replace_text=search_replace_text)
+    model_patch, edited_files, original_contents, new_contents = generate_robust_diff(structure=structure, search_replace_text=search_replace_text)
     
     # Prepare output dict
     gt_patch = instance_data.get("patch")
@@ -342,9 +515,9 @@ def process_item_step3(item_tuple):
         "instance_id": instance_id,
         "model_patch": model_patch,
         "raw_model_patch": search_replace_text,
-        "original_file_content": "",
-        "edited_files": [], # Populated based on actual logic if needed, currently placeholder
-        "new_file_content": "" # Placeholder
+        "original_file_content": original_contents,
+        "edited_files": edited_files,
+        "new_file_content": new_contents
     }
     
     return (custom_id, raw_dict, processed_dict)

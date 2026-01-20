@@ -152,3 +152,5 @@ logs/
 tmp/
 temp/
 results/
+
+slurm-*.out
