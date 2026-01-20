@@ -2,6 +2,7 @@
 #SBATCH --job-name=reproduction
 #SBATCH --cpus-per-task=64
 #SBATCH --ntasks-per-node=1
+#SBATCH --exclusive
 #SBATCH --ntasks=1
 #SBATCH --time=24:00:00
 #SBATCH -p debug
