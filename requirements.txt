@@ -1,0 +1,21 @@
+anthropic
+datasets
+jsonlines
+libcst
+llama-index
+openai
+pre-commit
+tiktoken
+ipdb
+tqdm
+rich
+tenacity
+unidiff
+chardet
+beautifulsoup4
+ghapi
+GitPython
+termcolor
+matplotlib
+python-dotenv
+-e ./thirdparty/Agentless/thirdparty/SWE-bench
