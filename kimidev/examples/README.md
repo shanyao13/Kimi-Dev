@@ -37,7 +37,10 @@ Both scripts follow the same 3-stage pattern:
 python batch_rollout_bugfixer.py \
     --stage gen_step1 \
     --dataset princeton-nlp/SWE-bench_Lite \
-    --save_dir results/dsr1-bugfixer \
+    --repostructure_dir ./repostructures \
+    --output_file results/dsr1-bugfixer/batch_requests_step1.jsonl \
+    --model_name "deepseek-ai/DeepSeek-V3.2" \
+    --temp 1.0 \
     --passk 1
 ```
 *   **Result**: `results/dsr1-bugfixer/batch_requests_step1.jsonl`
@@ -49,8 +52,11 @@ python batch_rollout_bugfixer.py \
 python batch_rollout_bugfixer.py \
     --stage proc_step1_gen_step2 \
     --dataset princeton-nlp/SWE-bench_Lite \
-    --save_dir results/dsr1-bugfixer \
-    --step1_output results/dsr1-bugfixer/batch_output_step1.jsonl \
+    --repostructure_dir ./repostructures \
+    --input_file results/dsr1-bugfixer/batch_output_step1.jsonl \
+    --output_file results/dsr1-bugfixer/batch_requests_step2.jsonl \
+    --model_name "deepseek-ai/DeepSeek-V3.2" \
+    --temp 1.0 \
     --passk 1 \
     --num_workers 32
 ```
@@ -63,8 +69,9 @@ python batch_rollout_bugfixer.py \
 python batch_rollout_bugfixer.py \
     --stage proc_step2 \
     --dataset princeton-nlp/SWE-bench_Lite \
+    --repostructure_dir ./repostructures \
+    --input_file results/dsr1-bugfixer/batch_output_step2.jsonl \
     --save_dir results/dsr1-bugfixer \
-    --step2_output results/dsr1-bugfixer/batch_output_step2.jsonl \
     --passk 1 \
     --num_workers 32
 ```
@@ -79,7 +86,10 @@ python batch_rollout_bugfixer.py \
 python batch_rollout_testwriter.py \
     --stage gen_step1 \
     --dataset princeton-nlp/SWE-bench_Lite \
-    --save_dir results/dsr1-testwriter \
+    --repostructure_dir ./repostructures \
+    --output_file results/dsr1-testwriter/batch_requests_step1.jsonl \
+    --model_name "deepseek-ai/DeepSeek-V3.2" \
+    --temp 1.0 \
     --passk 1
 ```
 
@@ -88,8 +98,11 @@ python batch_rollout_testwriter.py \
 python batch_rollout_testwriter.py \
     --stage proc_step1_gen_step2 \
     --dataset princeton-nlp/SWE-bench_Lite \
-    --save_dir results/dsr1-testwriter \
-    --step1_output results/dsr1-testwriter/batch_output_step1.jsonl \
+    --repostructure_dir ./repostructures \
+    --input_file results/dsr1-testwriter/batch_output_step1.jsonl \
+    --output_file results/dsr1-testwriter/batch_requests_step2.jsonl \
+    --model_name "deepseek-ai/DeepSeek-V3.2" \
+    --temp 1.0 \
     --passk 1
 ```
 
@@ -98,8 +111,10 @@ python batch_rollout_testwriter.py \
 python batch_rollout_testwriter.py \
     --stage proc_step2 \
     --dataset princeton-nlp/SWE-bench_Lite \
+    --repostructure_dir ./repostructures \
+    --input_file results/dsr1-testwriter/batch_output_step2.jsonl \
+    --step1_file results/dsr1-testwriter/batch_output_step1.jsonl \
     --save_dir results/dsr1-testwriter \
-    --step2_output results/dsr1-testwriter/batch_output_step2.jsonl \
     --passk 1
 ```
 *   **Result**: Reproduction scripts saved in `results/dsr1-testwriter/samples/` and `failures.jsonl`.
