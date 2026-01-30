@@ -284,6 +284,8 @@ def process_item_step2(item_tuple):
 
     raw_answer = response_item['response']['body']['choices'][0]['message']['content']
     
+    if raw_answer is None:
+        return None
     # We need instance_id to get structure
     # instance_data has the ID.
     instance_id = instance_data['instance_id']

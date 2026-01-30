@@ -1,0 +1,9 @@
+anthropic
+openai
+pre-commit
+datasets
+tiktoken
+libcst
+llama-index
+jsonlines
+-e ./thirdparty/SWE-bench

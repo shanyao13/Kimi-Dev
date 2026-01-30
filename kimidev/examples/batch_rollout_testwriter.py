@@ -6,6 +6,7 @@ from tqdm import tqdm
 import sys
 import functools
 import concurrent.futures
+from func_timeout import func_timeout, FunctionTimedOut
 
 from datasets import load_dataset
 from kimidev.agentlessnano.utils import (
@@ -126,6 +127,8 @@ def process_item_step2(item_tuple):
         return None
 
     raw_answer = response_item['response']['body']['choices'][0]['message']['content']
+    if raw_answer is None:
+        return None
     
     if "__pass" in custom_id:
         instance_id = custom_id.split("__pass")[0]
@@ -435,55 +438,97 @@ def process_item_step3(item_tuple):
 def proc_step2(args):
     print("Processing Stage 2 outputs and saving final results...")
     
-    batch_outputs = {}
-    with open(args.input_file, 'r') as f:
-        for line in f:
-            item = json.loads(line)
-            batch_outputs[item['custom_id']] = item
+    process_items = []
 
-    # Load Step 1 outputs to reconstruct context
+    # Helper to slim down items
+    def extract_essential(item):
+        # We only need the response content and status code
+        # We discard the input 'body' which contains the huge prompt
+        if 'response' not in item:
+            return None
+            
+        resp = item['response']
+        # Deep copy or construct new dict to ensure we don't keep reference to large parent
+        # Structure needed by process_item_step3_full: item['response']['status_code'], item['response']['body']['choices'][0]['message']['content']
+        
+        status_code = resp.get('status_code', 200)
+        
+        # Safety check for failed requests
+        if status_code != 200:
+             return {'response': {'status_code': status_code, 'body': str(resp)}}
+             
+        try:
+            content = resp['body']['choices'][0]['message']['content']
+            return {
+                'response': {
+                    'status_code': 200,
+                    'body': {
+                        'choices': [{'message': {'content': content}}]
+                    },
+                    'model': resp.get('body', {}).get('model', '') # Keep model name if needed
+                }
+            }
+        except Exception:
+            # Malformed response
+            return {'response': {'status_code': 500, 'body': "Malformed"}}
+
+    # Load Step 1 outputs (Slimmed)
     step1_outputs = {}
     if args.step1_file:
+        print(f"Loading Step 1 outputs from {args.step1_file}...")
         with open(args.step1_file, 'r') as f:
             for line in f:
                 item = json.loads(line)
-                step1_outputs[item['custom_id']] = item
+                slim_item = extract_essential(item)
+                if slim_item:
+                    step1_outputs[item['custom_id']] = slim_item
+        print(f"Loaded {len(step1_outputs)} Step 1 items.")
     else:
         print("Error: --step1_file is required for Step 3 to reconstruct context (found_files).")
         return
 
-    swe_bench_data = load_dataset(args.dataset, split="test")
-    swe_bench_dict = {d['instance_id']: d for d in swe_bench_data}
-    
+    # Load Step 2 outputs (Slimmed) and match
+    print(f"Loading Step 2 outputs from {args.input_file} and preparing tasks...")
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
-    
-    process_items = []
-    
-    for custom_id, response_item in batch_outputs.items():
-        if "__pass" in custom_id:
-             instance_id = custom_id.split("__pass")[0]
-        else:
-             instance_id = custom_id
-             
-        if instance_id not in swe_bench_dict:
-            continue
-            
-        if custom_id not in step1_outputs:
-            print(f"Warning: Step 1 output not found for {custom_id}")
-            continue
 
-        instance_data = swe_bench_dict[instance_id]
-        step1_item = step1_outputs[custom_id]
-        
-        process_items.append((
-            custom_id,
-            response_item,
-            step1_item,
-            instance_data,
-            args.repostructure_dir,
-            args.save_dir
-        ))
+    print(f"Loading dataset {args.dataset}...")
+    swe_bench_data = load_dataset(args.dataset, split="test")
+    swe_bench_dict = {d['instance_id']: d for d in swe_bench_data}
+
+    with open(args.input_file, 'r') as f:
+        for line in f:
+            item = json.loads(line)
+            custom_id = item['custom_id']
+            
+            # Slim down the step 2 item immediately
+            response_item = extract_essential(item)
+            if not response_item:
+                continue
+
+            if "__pass" in custom_id:
+                 instance_id = custom_id.split("__pass")[0]
+            else:
+                 instance_id = custom_id
+                 
+            if instance_id not in swe_bench_dict:
+                continue
+                
+            if custom_id not in step1_outputs:
+                print(f"Warning: Step 1 output not found for {custom_id}")
+                continue
+
+            instance_data = swe_bench_dict[instance_id]
+            step1_item = step1_outputs[custom_id]
+            
+            process_items.append((
+                custom_id,
+                response_item,
+                step1_item,
+                instance_data,
+                args.repostructure_dir,
+                args.save_dir
+            ))
         
     print(f"Prepared {len(process_items)} items for processing. Starting parallel execution...")
 
@@ -491,7 +536,7 @@ def proc_step2(args):
     samples_dir = os.path.join(args.save_dir, 'samples')
     os.makedirs(samples_dir, exist_ok=True)
     
-    pass_outputs = {} # integer key -> list of json strings
+
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         # Submit all tasks
@@ -518,16 +563,8 @@ def proc_step2(args):
                         continue
                     
                     if res.get('status') == 'success':
-                         # Files already saved in worker
-                         # Aggregate for final output if needed? 
-                         # We need to build pass_outputs for "output_N_processed.jsonl"
-                         # So we still need minimal info: custom_id (for pass_idx) and instance_dict (parsed content).
-                         # But instance_dict has patch which can be large.
-                         # Can we write to "output_N" incrementally? No, it's one file per pass.
-                         # Maybe we just need the JSON line string?
-                         
                          custom_id = res['custom_id']
-                         instance_dict_str = res['instance_dict_str'] # Pass string instead of dict?
+                         instance_dict_str = res['instance_dict_str'] 
                          
                          # Determine pass index
                          if "__pass" in custom_id:
@@ -538,28 +575,18 @@ def proc_step2(args):
                          else:
                              pass_idx = 0
                          
-                         if pass_idx not in pass_outputs:
-                             pass_outputs[pass_idx] = []
+                         # Stream write directly to file instead of keeping in memory!
+                         output_filename = f"output_{pass_idx}_processed_reproduction_test.jsonl"
+                         output_file_path = os.path.join(args.save_dir, output_filename)
                          
-                         pass_outputs[pass_idx].append(instance_dict_str)
+                         with open(output_file_path, 'a') as out_f:
+                             out_f.write(instance_dict_str + '\n')
 
-            except Exception as e:
-                print(f"Error processing item: {e}")
             except Exception as e:
                 print(f"Error processing item: {e}")
         
     # Save aggregated files
-    for pass_idx, lines in pass_outputs.items():
-        output_filename = f"output_{pass_idx}_processed_reproduction_test.jsonl"
-        output_file_path = os.path.join(args.save_dir, output_filename)
-        
-        with open(output_file_path, 'w') as out_f:
-            for line in lines:
-                out_f.write(line + '\n')
-        
-        print(f"Saved {len(lines)} records to {output_filename}")
-            
-    print(f"All results saved to {args.save_dir}")
+    print(f"All process results saved to {args.save_dir}")
 
 
 def fix_relative_imports(content, file_path):
@@ -732,7 +759,7 @@ def apply_patches(file_contentes_dict, search_replace_text):
             
             # 1. Exact match
             if search_str in current_content:
-                new_content = current_content.replace(search_str, replace_str)
+                new_content = current_content.replace(search_str, replace_str, 1)    #注意
                 file_contentes_dict[file_name]['new_content'] = new_content
                 continue
                 
@@ -753,7 +780,7 @@ def apply_patches(file_contentes_dict, search_replace_text):
                 # Actually, often the model output has `\n\n` before search, regex captures empty line.
                 # s_strip removes it. current_content has the code.
                 # So replacing s_strip with replace_str is plausible.
-                new_content = current_content.replace(s_strip, replace_str)
+                new_content = current_content.replace(s_strip, replace_str, 1)
                 file_contentes_dict[file_name]['new_content'] = new_content
                 continue
             
@@ -886,6 +913,20 @@ def identify_new_test_methods(old_content, new_content):
     return None
 
 def process_item_step3_full(item_tuple):
+    try:
+        # Set a 60-second timeout for the entire processing of one item
+        return func_timeout(60, _process_item_step3_full_logic, args=(item_tuple,))
+    except FunctionTimedOut:
+        custom_id = item_tuple[0]
+        instance_id = item_tuple[3].get("instance_id", "unknown")
+        print(f"Timeout processing item {custom_id}")
+        return {'status': 'failed', 'reason': 'timeout', 'custom_id': custom_id, 'instance_id': instance_id}
+    except Exception as e:
+        custom_id = item_tuple[0]
+        print(f"Unexpected error in wrapper for {custom_id}: {e}")
+        return {'status': 'failed', 'reason': 'exception', 'custom_id': custom_id, 'details': str(e)}
+
+def _process_item_step3_full_logic(item_tuple):
     custom_id, response_item, step1_item, instance_data, args_repostructure_dir, args_save_dir = item_tuple
 
     # Status check
@@ -932,10 +973,10 @@ def process_item_step3_full(item_tuple):
     model_found_files = [correct_file_path_in_structure(file, structure) for file in model_found_files]
     found_files = correct_file_paths(model_found_files, files)
     
-    # Filter for test files only
+    # Filter for test files only and skip parsetab.py
     pred_found_files_new = []
     for file in found_files:
-        if 'test' in file:
+        if 'test' in file and 'parsetab.py' not in file:
             pred_found_files_new.append(file)
     found_files = pred_found_files_new
 
@@ -974,10 +1015,24 @@ def process_item_step3_full(item_tuple):
     if target_file and target_file in file_contentes_dict:
         new_content = file_contentes_dict[target_file]['new_content']
         
-        # Use full file strategy as requested
-        # We take the entire updated file content, fix relative imports, and ensure it runs.
-        repro_script_content = make_reproduction_script_full_file(new_content, file_path=target_file)
-        model_patch = create_patch_from_code(repro_script_content)
+        # Determine if we should skip heavy analysis based on size (Graceful Degradation)
+        patch_line_count = len(search_replace_text.splitlines())
+        total_line_count = len(new_content.splitlines())
+        
+        if patch_line_count > 500 or total_line_count > 2000:
+            # Degrade to simple full file content without AST/Diff to save memory/time
+            repro_script_content = new_content
+            model_patch = f"```python\n{new_content}\n```"
+        else:
+            # Normal heavy analysis for reasonably sized files
+            # We take the entire updated file content, fix relative imports, and ensure it runs.
+            try:
+                repro_script_content = make_reproduction_script_full_file(new_content, file_path=target_file)
+                model_patch = create_patch_from_code(repro_script_content)
+            except Exception as e:
+                # Fallback if processing fails
+                repro_script_content = new_content
+                model_patch = f"```python\n{new_content}\n```"
             
     else:
                 return {'status': 'failed', 'reason': 'target_file_not_in_contents', 'custom_id': custom_id, 'target_file': target_file, 'available': list(file_contentes_dict.keys())}
@@ -998,7 +1053,7 @@ def process_item_step3_full(item_tuple):
     
     # 2. Processed dict (for final output)
     instance_dict = {
-        "model_name_or_path": response_item['response']['body']['model'],
+        "model_name_or_path": response_item['response'].get('model', 'unknown'),
         "instance_id": instance_id,
         "test_patch": model_patch,
         # User feedback: raw_test_patch should be the content of the final reproduce_bug.py

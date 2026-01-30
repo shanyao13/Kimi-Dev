@@ -1415,7 +1415,7 @@ def generate_model_patch_difflib_testwritter(file_contentes_dict, search_replace
         new_content_dict = copy.deepcopy(content_dict)
         for file_name, search_str, replace_str in zip(file_names, search_strings, replace_strings): 
             if file_name in content_dict: # Perform the replacement in the content
-                new_content_dict[file_name] = new_content_dict[file_name].replace(search_str, replace_str) 
+                new_content_dict[file_name] = new_content_dict[file_name].replace(search_str, replace_str,1) 
         return new_content_dict
 
     ori_file_contents = {}
